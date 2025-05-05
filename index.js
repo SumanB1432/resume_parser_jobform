@@ -1011,7 +1011,9 @@ app.post('/parse-resumes', upload.array('file'), async (req, res) => {
     // The updated code cleans up each temp file right after it's processed in the batch.
 });
 
-
+app.post("/",(req,res)=>{
+    return res.send({message:"hello form parse resume"})
+})
 // --- Start the Express Server ---
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
