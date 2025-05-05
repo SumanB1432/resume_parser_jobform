@@ -20,7 +20,9 @@ const PDFParser = require('pdf2json');
 require('dotenv').config();
 
 // Log the GOOGLE_APPLICATION_CREDENTIALS environment variable status for debugging
-console.log('GOOGLE_APPLICATION_CREDENTIALS is set to:', process.env.GOOGLE_APPLICATION_CREDENTIALS ? '[Set]' : '[Not Set]');
+
+const serviceAccount = require("./jobform-automator-website-firebase-adminsdk-2oy5c-656b3b3764.json");
+
 
 // --- Firebase Admin Initialization ---
 // Initialize Firebase Admin SDK
@@ -42,14 +44,9 @@ if (admin.apps.length === 0) {
         // authenticates directly with Google Cloud, not via typical client-side API keys.
         // You only need to provide the necessary project/service details.
         admin.initializeApp({
-            apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-            authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-            databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
-            projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-            storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-            messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-            appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-            measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+          credential: admin.credential.cert(serviceAccount),
+          storageBucket: "jobform-automator-website.appspot.com",
+          databaseURL: "https://jobform-automator-website-default-rtdb.firebaseio.com",
         });
         console.log('Firebase Admin SDK initialized successfully (using GOOGLE_APPLICATION_CREDENTIALS if set).');
     } catch (error) {
