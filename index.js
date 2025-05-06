@@ -551,7 +551,7 @@ const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
         const originalFileName = filename || `resume-${candidateId}.pdf`;
         // Sanitize filename for storage paths - keep dots but remove other invalid chars
         const sanitizedFileName = originalFileName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-        const uniqueFileName = `resume/${candidateId}_${Date.now()}_${sanitizedFileName}`; // Store in a 'resumes' folder
+        const uniqueFileName = `Resume/${candidateId}_${Date.now()}_${sanitizedFileName}`; // Store in a 'resumes' folder
 
         const fileRef = bucket.file(uniqueFileName);
         console.log(`Attempting to upload ${filename} (from ${filePath}) to gs://${bucket.name}/${uniqueFileName}`);
