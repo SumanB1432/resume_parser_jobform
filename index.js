@@ -21,7 +21,9 @@ require('dotenv').config();
 
 // Log the GOOGLE_APPLICATION_CREDENTIALS environment variable status for debugging
 
-const serviceAccount = require("./jobform-automator-website-firebase-adminsdk-2oy5c-656b3b3764.json");
+ const serviceAccount = JSON.parse(
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf8")
+  );;
 
 
 // --- Firebase Admin Initialization ---
@@ -54,6 +56,7 @@ if (admin.apps.length === 0) {
         // Exit if initialization fails, as core services won't work
         process.exit(1);
     }
+
 }
 
 // After successful initialization, get database and bucket references
@@ -1016,3 +1019,5 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Resume parsing endpoint: POST http://localhost:${PORT}/parse-resumes`);
 });
+
+
