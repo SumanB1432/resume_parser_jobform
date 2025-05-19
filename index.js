@@ -13,11 +13,18 @@ const admin = require('firebase-admin');
 
 // Use pdf2json for text extraction
 const PDFParser = require('pdf2json');
+require('dotenv').config();
 
 // Load environment variables from .env file
 // --- Express App Setup ---
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Configure CORS to allow specific origin
+// Load environment variables from .env file FIRST
+
+
+
 
 // Configure CORS to allow specific origin
 const allowedOrigins = [
@@ -45,9 +52,9 @@ app.options('*', (req, res) => {
   res.sendStatus(204);
 });
 
-// Existing middleware and setup (unchanged)
+// Existing middleware
 app.use(express.json());
-require('dotenv').config();
+
 
 // Log the GOOGLE_APPLICATION_CREDENTIALS environment variable status for debugging
 const serviceAccount = JSON.parse(
