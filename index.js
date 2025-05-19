@@ -15,6 +15,22 @@ const admin = require('firebase-admin');
 const PDFParser = require('pdf2json');
 
 // Load environment variables from .env file
+// --- Express App Setup ---
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Configure CORS to allow specific origin
+app.use(cors({
+  origin: 'https://www.jobformautomator.com',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Handle preflight OPTIONS requests
+app.options('*', cors());
+
+// Existing middleware and setup (unchanged)
+app.use(express.json());
 require('dotenv').config();
 
 // Log the GOOGLE_APPLICATION_CREDENTIALS environment variable status for debugging
@@ -756,22 +772,6 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     };
 };
 
-// --- Express App Setup ---
-const app = express();
-const PORT = process.env.PORT || 3001;
-
-// Configure CORS to allow specific origin
-app.use(cors({
-  origin: 'https://www.jobformautomator.com',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Handle preflight OPTIONS requests
-app.options('*', cors());
-
-// Existing middleware and setup (unchanged)
-app.use(express.json());
 
 // Configure multer for single file upload
 const upload = multer({
