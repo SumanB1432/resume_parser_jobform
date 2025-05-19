@@ -760,12 +760,15 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Enable CORS for all origins
+// Configure CORS to allow specific origin
 app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type'],
+  origin: 'https://www.jobformautomator.com',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Handle preflight OPTIONS requests
+app.options('*', cors());
 
 // Existing middleware and setup (unchanged)
 app.use(express.json());
