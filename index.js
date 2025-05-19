@@ -20,14 +20,30 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Configure CORS to allow specific origin
+const allowedOrigins = [
+  'https://www.jobformautomator.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+];
+
 app.use(cors({
-  origin: 'https://www.jobformautomator.com',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // Handle preflight OPTIONS requests
-app.options('*', cors());
+app.options('*', (req, res) => {
+  res.sendStatus(204);
+});
 
 // Existing middleware and setup (unchanged)
 app.use(express.json());
