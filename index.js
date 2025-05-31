@@ -1,3 +1,5 @@
+// server.js
+
 const express = require('express');
 const multer = require('multer'); // Middleware for handling multipart/form-data
 const fs = require('fs').promises; // Import promise-based fs methods
@@ -5,14 +7,12 @@ const nodeFs = require('fs'); // Import standard fs methods (including streams)
 const os = require('os');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const cors = require("cors")
-const {GoogleGenerativeAI} = require("@google/generative-ai"); // Use @google-cloud/generative-ai for server-side Node.js
+const cors = require("cors");
+const { GoogleGenerativeAI } = require("@google/generative-ai"); // Use @google-cloud/generative-ai for server-side Node.js
+const pdfjsLib = require('pdfjs-dist'); // Use pdfjs-dist for text extraction
 
 // Use firebase-admin instead of client SDKs
 const admin = require('firebase-admin');
-
-// Use pdf2json for text extraction
-const PDFParser = require('pdf2json');
 
 // Load environment variables from .env file
 require('dotenv').config();
@@ -23,33 +23,22 @@ const serviceAccount = JSON.parse(
 );
 
 // --- Firebase Admin Initialization ---
-// Initialize Firebase Admin SDK
-// It automatically uses the GOOGLE_APPLICATION_CREDENTIALS environment variable
-// Make sure that environment variable is set before running the script.
-// You also need NEXT_PUBLIC_FIREBASE_PROJECT_ID and NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
-// set in your .env file for basic configuration.
 if (admin.apps.length === 0) {
     try {
         // Validate required environment variables for admin SDK config
         if (!process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || !process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET) {
-             console.error("FATAL ERROR: NEXT_PUBLIC_FIREBASE_PROJECT_ID and NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET must be set in your .env file for Admin SDK initialization.");
-             // Exit immediately as Firebase initialization is critical for storage and database operations
-             process.exit(1);
+            console.error("FATAL ERROR: NEXT_PUBLIC_FIREBASE_PROJECT_ID and NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET must be set in your .env file for Admin SDK initialization.");
+            process.exit(1);
         }
 
-        // IMPORTANT: Remove client-side Firebase config properties (apiKey, authDomain, etc.).
-        // When using a service account key (via GOOGLE_APPLICATION_CREDENTIALS), the Admin SDK
-        // authenticates directly with Google Cloud, not via typical client-side API keys.
-        // You only need to provide the necessary project/service details.
         admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-          storageBucket: "jobform-automator-website.appspot.com",
-          databaseURL: "https://jobform-automator-website-default-rtdb.firebaseio.com",
+            credential: admin.credential.cert(serviceAccount),
+            storageBucket: "jobform-automator-website.appspot.com",
+            databaseURL: "https://jobform-automator-website-default-rtdb.firebaseio.com",
         });
         console.log('Firebase Admin SDK initialized successfully (using GOOGLE_APPLICATION_CREDENTIALS if set).');
     } catch (error) {
         console.error('Error initializing Firebase Admin SDK:', error);
-        // Exit if initialization fails, as core services won't work
         process.exit(1);
     }
 }
@@ -62,95 +51,76 @@ const bucket = admin.storage().bucket(); // Use the default bucket associated wi
 const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 if (!apiKey) {
     console.error("FATAL ERROR: NEXT_PUBLIC_GEMINI_API_KEY is not set in your .env file.");
-    // Allow server to start but parsing will fail gracefully
 }
 
 // Use @google-cloud/generative-ai which is better suited for server-side Node.js
-// The library can also pick up credentials automatically if GOOGLE_APPLICATION_CREDENTIALS is set,
-// but for the Gemini API specifically, using the API key is the standard approach.
 const genAI = new GoogleGenerativeAI(apiKey || "");
 
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// --- PDF Text Extraction (using pdf2json and temporary files) ---
+// --- PDF Text Extraction (using pdfjs-dist and temporary files) ---
 const extractTextFromPdf = async (filePath, filename) => {
-    // Note: Multer saves files to disk, so we can parse directly from the path
-    // without creating our own temporary file from a buffer.
     console.log(`Processing temp file: ${filePath} for ${filename}`);
 
-    // Use pdf2json to extract text
-    const pdfParser = new PDFParser();
     let extractedText = '';
 
-    // Wrap pdf2json's event-based parsing in a Promise
-    await new Promise((resolve, reject) => {
-        pdfParser.on('pdfParser_dataError', (errData) => {
-            console.error(`pdf2json error for ${filename}:`, errData.parserError);
-            // Check if the error is related to an invalid PDF structure
-            if (errData.parserError && (errData.parserError.message.includes("Invalid PDF structure") || errData.parserError.message.includes("Premature end of file"))) {
-                reject(new Error(`Invalid or corrupted PDF file: ${filename}`));
-            } else {
-                 reject(errData.parserError);
-            }
-        });
+    try {
+        // Load the PDF document using pdfjs-dist
+        const pdf = await pdfjsLib.getDocument(filePath).promise;
+        const numPages = pdf.numPages;
 
-        pdfParser.on('pdfParser_dataReady', (pdfData) => {
-            console.log(`pdf2json finished parsing ${filename}`);
-            // Extract text from pages
-            if (pdfData && pdfData.Pages) {
-                for (const page of pdfData.Pages) {
-                    if (page.Texts) {
-                        for (const text of page.Texts) {
-                             // Decode URI-encoded text and append
-                             // pdf2json often URI encodes text. Re-encode '%' before decoding.
-                            try {
-                                const textContent = decodeURIComponent(text.R[0].T.replace(/%/g, '%25'));
-                                extractedText += textContent + ' ';
-                            } catch (decodeError) {
-                                extractedText += text.R[0].T + ' ';
-                            }
-                        }
-                    }
-                }
-            }
-            resolve();
-        });
+        // Iterate through each page to extract text
+        for (let i = 1; i <= numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            // Concatenate text items from the page
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            extractedText += pageText + ' ';
+        }
 
-        // Parse the temporary file provided by multer
-        pdfParser.loadPDF(filePath);
-    });
+        console.log(`Extracted text (${extractedText.length} chars) from ${filename} using pdfjs-dist.`);
 
-    console.log(`Extracted text (${extractedText.length} chars) from ${filename} using pdf2json.`);
+        // Check extracted text length
+        if (!extractedText || extractedText.trim().length < 50) {
+            console.warn(`Insufficient text extracted from ${filename}: ${extractedText?.length || 0} characters.`);
+            throw new Error(`Insufficient or invalid text content extracted from ${filename}`);
+        }
 
-    // Check extracted text length
-    if (!extractedText || extractedText.trim().length < 50) {
-        console.warn(`Insufficient text extracted from ${filename}: ${extractedText?.length || 0} characters.`);
+        return extractedText.trim();
+    } catch (error) {
+        console.error(`pdfjs-dist error for ${filename}:`, error.message);
+        // Handle specific errors like invalid PDF structure
+        if (error.message.includes('Invalid PDF structure') || error.message.includes('Corrupted')) {
+            throw new Error(`Invalid or corrupted PDF file: ${filename}`);
+        }
+        throw error; // Rethrow other errors
+    } finally {
+        // Clean up the PDF document resources
+        if (pdf) {
+            pdf.destroy();
+        }
     }
-
-    return extractedText.trim();
 };
 
 // --- Gemini Helper Functions ---
 const cleanGeminiJson = (raw) => {
     let cleaned = raw.trim();
-    // Remove leading and trailing markdown code block fences
     if (cleaned.startsWith('```json')) {
         const codeBlockEnd = cleaned.indexOf('```', 7);
-         if (codeBlockEnd !== -1) {
+        if (codeBlockEnd !== -1) {
             cleaned = cleaned.substring(7, codeBlockEnd).trim();
-         } else {
+        } else {
             cleaned = cleaned.substring(7).trim();
-         }
+        }
     } else if (cleaned.startsWith('```')) {
-         const codeBlockEnd = cleaned.indexOf('```', 3);
-         if (codeBlockEnd !== -1) {
-             cleaned = cleaned.substring(3, codeBlockEnd).trim();
-         } else {
-              cleaned = cleaned.substring(3).trim();
-         }
+        const codeBlockEnd = cleaned.indexOf('```', 3);
+        if (codeBlockEnd !== -1) {
+            cleaned = cleaned.substring(3, codeBlockEnd).trim();
+        } else {
+            cleaned = cleaned.substring(3).trim();
+        }
     }
 
-    // Attempt to remove leading/trailing non-JSON characters more robustly
     const jsonStart = cleaned.indexOf('{');
     const jsonEnd = cleaned.lastIndexOf('}');
     if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
@@ -257,7 +227,7 @@ Assign a score out of 100 for RS fit.
 
 Calculate Final Score: Compute the final score as \`(JD Match Score * 0.5) + (RS Match Score * 0.5)\`. Round to the nearest whole number.
 
-Synthesize Evaluation Summary: Write a concise summary (\`parsedText\`) explaining the final score. Highlight key strengths (points of strong alignment with both JD and RS) and weaknesses (significant gaps or areas where the resume fails to meet JD requirements or RS expectations). Be specific.
+Synthesize Evaluation Summary: Write a concise summary (\`parsedText\`) explaining the score. Highlight key strengths (points of strong alignment with both JD and RS) and weaknesses (significant gaps or areas where the resume fails to meet JD requirements or RS expectations). Be specific.
 
 Output Format:
 
@@ -281,8 +251,8 @@ Return only a JSON object adhering strictly to the following structure. Do not i
 
     try {
         if (!apiKey) {
-             console.error("Gemini API key is not configured within parseWithGemini. Skipping Gemini call.");
-             return {
+            console.error("Gemini API key is not configured within parseWithGemini. Skipping Gemini call.");
+            return {
                 name: 'API Key Missing',
                 email: `api_key_missing_${uuidv4()}@example.com`,
                 phone: 'N/A',
@@ -293,7 +263,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
                 experienceYears: 0,
                 jobTitle: 'API Key Missing',
                 education: 'N/A',
-             };
+            };
         }
 
         const extractedEmail = extractEmailFromText(text);
@@ -308,7 +278,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
             textForGemini = text.substring(0, MAX_TEXT_CHARS);
         }
 
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001"});
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
         const promptWithText = `
 You are an Advanced AI Resume Evaluator.
 
@@ -388,8 +358,8 @@ Return only a JSON object adhering strictly to the following structure. Do not i
 
         const result = await model.generateContent(promptWithText);
         if (!result || !result.response || typeof result.response.text !== 'function') {
-             console.error("Gemini API returned an unexpected empty result or response format.");
-             return {
+            console.error("Gemini API returned an unexpected empty result or response format.");
+            return {
                 name: 'API No Response',
                 email: extractedEmail || `api_no_response_${uuidv4()}@example.com`,
                 phone: 'N/A',
@@ -406,9 +376,9 @@ Return only a JSON object adhering strictly to the following structure. Do not i
         const raw = result.response.text();
         const cleaned = cleanGeminiJson(raw);
         if (!raw || cleaned.trim() === '') {
-             console.error("Gemini returned empty or whitespace-only content after cleaning.");
-             console.error("Gemini Raw Output (before cleaning):", raw);
-             return {
+            console.error("Gemini returned empty or whitespace-only content after cleaning.");
+            console.error("Gemini Raw Output (before cleaning):", raw);
+            return {
                 name: 'Empty AI Response',
                 email: extractedEmail || `empty_ai_response_${uuidv4()}@example.com`,
                 phone: 'N/A',
@@ -435,12 +405,12 @@ Return only a JSON object adhering strictly to the following structure. Do not i
                 experienceYears: parsed.experienceYears || 0,
                 jobTitle: parsed.jobTitle || 'N/A',
                 education: parsed.education || 'N/A',
-             };
+            };
         } catch (jsonParseError) {
-             console.error('Failed to parse Gemini output as JSON:', jsonParseError);
-             console.error('Raw output causing JSON parse error (partial):', cleaned.substring(0, 500) + '...');
-             return {
-                 name: 'JSON Parse Failed',
+            console.error('Failed to parse Gemini output as JSON:', jsonParseError);
+            console.error('Raw output causing JSON parse error (partial):', cleaned.substring(0, 500) + '...');
+            return {
+                name: 'JSON Parse Failed',
                 email: extractedEmail || `json_parse_failed_${uuidv4()}@example.com`,
                 phone: 'N/A',
                 location: 'N/A',
@@ -450,14 +420,14 @@ Return only a JSON object adhering strictly to the following structure. Do not i
                 experienceYears: 0,
                 jobTitle: 'JSON Parse Failed',
                 education: 'N/A',
-             };
+            };
         }
     } catch (error) {
         console.error('Gemini parsing failed with API error:', error.message, error);
-         if (error instanceof Error && error.message.includes('safety ratings')) {
-             console.error('Gemini blocked content due to safety ratings.');
-             return {
-                 name: 'Content Blocked',
+        if (error instanceof Error && error.message.includes('safety ratings')) {
+            console.error('Gemini blocked content due to safety ratings.');
+            return {
+                name: 'Content Blocked',
                 email: extractedEmail || `content_blocked_${uuidv4()}@example.com`,
                 phone: 'N/A',
                 location: 'N/A',
@@ -467,10 +437,10 @@ Return only a JSON object adhering strictly to the following structure. Do not i
                 experienceYears: 0,
                 jobTitle: 'Content Blocked',
                 education: 'N/A',
-             };
-         }
+            };
+        }
         return {
-             name: 'Parsing Failed',
+            name: 'Parsing Failed',
             email: extractedEmail || `parsing_failed_${uuidv4()}@example.com`,
             phone: 'N/A',
             location: 'N/A',
@@ -493,20 +463,20 @@ const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
         console.log(`Attempting to upload ${filename} (from ${filePath}) to gs://${bucket.name}/${uniqueFileName}`);
 
         const uploadStream = fileRef.createWriteStream({
-             metadata: {
-                 contentType: 'application/pdf',
-             },
-             public: true
+            metadata: {
+                contentType: 'application/pdf',
+            },
+            public: true
         });
 
         await new Promise((resolve, reject) => {
-             const readStream = nodeFs.createReadStream(filePath);
-             readStream.pipe(uploadStream)
-                 .on('error', reject)
-                 .on('finish', resolve);
+            const readStream = nodeFs.createReadStream(filePath);
+            readStream.pipe(uploadStream)
+                .on('error', reject)
+                .on('finish', resolve);
         });
 
-         const downloadURL = `https://storage.googleapis.com/${bucket.name}/${encodeURIComponent(uniqueFileName)}`;
+        const downloadURL = `https://storage.googleapis.com/${bucket.name}/${encodeURIComponent(uniqueFileName)}`;
         console.log(`Successfully uploaded to: ${downloadURL}`);
         return downloadURL;
     } catch (error) {
@@ -518,7 +488,7 @@ const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
 const saveCandidateToRealtimeDatabase = async (candidate) => {
     try {
         if (candidate.name === 'API Key Missing') {
-             console.warn(`Saving candidate ${candidate.id} with API key error status.`);
+            console.warn(`Saving candidate ${candidate.id} with API key error status.`);
         }
 
         const candidateRef = database.ref(`talent_pool/${candidate.id}`);
@@ -539,7 +509,7 @@ const saveCandidateToRealtimeDatabase = async (candidate) => {
             processedAt: admin.database.ServerValue.TIMESTAMP
         };
 
-         Object.keys(dataToSave).forEach(key => dataToSave[key] === undefined || dataToSave[key] === null ? delete dataToSave[key] : {});
+        Object.keys(dataToSave).forEach(key => dataToSave[key] === undefined || dataToSave[key] === null ? delete dataToSave[key] : {});
         await candidateRef.set(dataToSave);
         console.log(`✅ Candidate ${candidate.id} saved successfully to DB`);
     } catch (error) {
@@ -556,22 +526,22 @@ async function processInBatches(items, batchSize, processBatchFn) {
         const batchResults = await processBatchFn(batch);
         results.push(...batchResults);
         if (i + batchSize < items.length) {
-             console.log(`--- Batch processed. Waiting 5 seconds before next batch... ---`);
-             await delay(5000);
+            console.log(`--- Batch processed. Waiting 5 seconds before next batch... ---`);
+            await delay(5000);
         }
     }
     return results;
 }
 
 const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion) => {
-     console.log(`Starting resume processing for ${multerFiles.length} file(s) received.`);
+    console.log(`Starting resume processing for ${multerFiles.length} file(s) received.`);
     if (!apiKey || admin.apps.length === 0 || !database || !bucket) {
         const reason = !apiKey ? "Gemini API Key is not configured." : "Firebase Admin SDK failed to initialize.";
         console.error(`Cannot process files: ${reason}`);
-         const candidatesWithError = multerFiles.map(file => {
-             const id = uuidv4();
-             const candidate = validateCandidate({
-                 id: id,
+        const candidatesWithError = multerFiles.map(file => {
+            const id = uuidv4();
+            const candidate = validateCandidate({
+                id: id,
                 name: reason.includes("Gemini") ? 'API Key Missing' : 'Service Error',
                 email: `${reason.includes("Gemini") ? 'api_key_missing' : 'service_error'}_${id}@example.com`,
                 phone: 'N/A',
@@ -583,15 +553,15 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
                 jobTitle: 'Error',
                 education: 'N/A',
                 resumeUrl: `File received: ${file.originalname}`,
-             });
-             if (admin.apps.length > 0 && database) {
-                 saveCandidateToRealtimeDatabase(candidate).catch(console.error);
-             } else {
-                 console.error(`Could not save error entry for ${file.originalname}: Firebase Database not initialized.`);
-             }
-             return candidate;
-         });
-         console.log(`Created error entries for all files due to: ${reason}`);
+            });
+            if (admin.apps.length > 0 && database) {
+                saveCandidateToRealtimeDatabase(candidate).catch(console.error);
+            } else {
+                console.error(`Could not save error entry for ${file.originalname}: Firebase Database not initialized.`);
+            }
+            return candidate;
+        });
+        console.log(`Created error entries for all files due to: ${reason}`);
         return {
             success: false,
             totalProcessed: multerFiles.length,
@@ -600,7 +570,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
         };
     }
     if (multerFiles.length === 0) {
-         console.log("No files provided to process.");
+        console.log("No files provided to process.");
         return {
             success: true,
             totalProcessed: 0,
@@ -608,14 +578,14 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
             message: "No files were provided for processing."
         };
     }
-     const pdfFiles = multerFiles.filter(file => file.mimetype === 'application/pdf');
+    const pdfFiles = multerFiles.filter(file => file.mimetype === 'application/pdf');
     const nonPdfFiles = multerFiles.filter(file => file.mimetype !== 'application/pdf');
-     if (nonPdfFiles.length > 0) {
-         console.warn(`Skipping ${nonPdfFiles.length} non-PDF file entries.`);
-         nonPdfFiles.forEach(file => {
-             const id = uuidv4();
-             const candidate = validateCandidate({
-                 id: id,
+    if (nonPdfFiles.length > 0) {
+        console.warn(`Skipping ${nonPdfFiles.length} non-PDF file entries.`);
+        nonPdfFiles.forEach(file => {
+            const id = uuidv4();
+            const candidate = validateCandidate({
+                id: id,
                 name: 'Invalid File Type',
                 email: `invalid_type_${id}@example.com`,
                 phone: 'N/A',
@@ -627,22 +597,22 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
                 jobTitle: 'N/A',
                 education: 'N/A',
                 resumeUrl: `File received: ${file.originalname}`,
-             });
-              saveCandidateToRealtimeDatabase(candidate).catch(console.error);
-         });
-     }
+            });
+            saveCandidateToRealtimeDatabase(candidate).catch(console.error);
+        });
+    }
     if (pdfFiles.length === 0) {
-         console.log("No valid PDF files found after filtering.");
+        console.log("No valid PDF files found after filtering.");
         return {
-             success: true,
-             totalProcessed: multerFiles.length,
-             validPdfProcessed: 0,
-             invalidFilesSkipped: nonPdfFiles.length,
-             candidates: [],
+            success: true,
+            totalProcessed: multerFiles.length,
+            validPdfProcessed: 0,
+            invalidFilesSkipped: nonPdfFiles.length,
+            candidates: [],
             message: "No valid PDF files were provided for processing."
         };
     }
-     console.log(`Found ${pdfFiles.length} valid PDF files to process.`);
+    console.log(`Found ${pdfFiles.length} valid PDF files to process.`);
     const candidates = await processInBatches(
         pdfFiles,
         5,
@@ -674,28 +644,28 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
                             jobTitle: 'N/A',
                             education: 'N/A',
                             resumeUrl: `File received: ${filename}`,
-                         });
-                         await saveCandidateToRealtimeDatabase(candidate);
-                         batchResults.push(candidate);
-                         console.log(`-> Skipped ${filename}, added insufficient text error entry.`);
-                         continue;
+                        });
+                        await saveCandidateToRealtimeDatabase(candidate);
+                        batchResults.push(candidate);
+                        console.log(`-> Skipped ${filename}, added insufficient text error entry.`);
+                        continue;
                     }
                     console.log(`-> Sending text from ${filename} to Gemini...`);
                     const parsedCandidateData = await parseWithGemini(text, jobDescription, recruiterSuggestion);
                     candidate = validateCandidate({
                         ...parsedCandidateData,
                         id: id,
-                         approved: false,
-                         resumeUrl: 'N/A',
+                        approved: false,
+                        resumeUrl: 'N/A',
                     });
                     console.log(`-> Gemini parsing attempted for ${filename}. Result name: ${candidate.name}, Score: ${candidate.score}`);
                     const geminiErrorNames = ['API Key Missing', 'API No Response', 'Empty AI Response', 'JSON Parse Failed', 'Content Blocked', 'Parsing Failed'];
                     if (geminiErrorNames.includes(candidate.name)) {
-                         console.warn(`-> Gemini returned a fatal error status for ${filename}: ${candidate.name}. Skipping upload.`);
-                         await saveCandidateToRealtimeDatabase(candidate);
-                         batchResults.push(candidate);
-                         console.log(`-> Saved Gemini error candidate for ${filename}.`);
-                         continue;
+                        console.warn(`-> Gemini returned a fatal error status for ${filename}: ${candidate.name}. Skipping upload.`);
+                        await saveCandidateToRealtimeDatabase(candidate);
+                        batchResults.push(candidate);
+                        console.log(`-> Saved Gemini error candidate for ${filename}.`);
+                        continue;
                     }
                     try {
                         const resumeUrl = await uploadToFirebaseStorage(filePath, filename, id);
@@ -704,7 +674,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
                     } catch (uploadError) {
                         console.error(`-> Failed to upload ${filename} to storage:`, uploadError);
                         candidate.resumeUrl = 'Upload Failed';
-                         candidate.parsedText = `${candidate.parsedText}\n\nNote: Failed to upload resume file: ${uploadError.message.substring(0, Math.min(uploadError.message.length, 200))}...`;
+                        candidate.parsedText = `${candidate.parsedText}\n\nNote: Failed to upload resume file: ${uploadError.message.substring(0, Math.min(uploadError.message.length, 200))}...`;
                     }
                     await saveCandidateToRealtimeDatabase(candidate);
                     batchResults.push(candidate);
@@ -732,12 +702,12 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
                     console.log(`-> Added general error candidate from ${filename} to batch results.`);
                 } finally {
                     try {
-                         await fs.access(filePath);
-                         await fs.unlink(filePath);
+                        await fs.access(filePath);
+                        await fs.unlink(filePath);
                     } catch (cleanupErr) {
-                         if (cleanupErr.code !== 'ENOENT') {
+                        if (cleanupErr.code !== 'ENOENT') {
                             console.error(`Error cleaning up temp file ${filePath} in individual file finally block:`, cleanupErr);
-                         }
+                        }
                     }
                 }
             }
@@ -760,47 +730,47 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
 const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(cors({
-  origin: 'https://www.jobformautomator.com',
-  methods: ['GET', 'POST'], // Specify allowed methods (adjust as needed)
-  allowedHeaders: ['Content-Type'], // Specify allowed headers (adjust as needed)
-  credentials: true, // Enable if your frontend sends credentials (e.g., cookies)
+    origin: 'https://www.jobformautomator.com',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type'],
+    credentials: true,
 }));
 
 // Configure multer for single file upload
 const upload = multer({
-  dest: os.tmpdir(),
-  limits: {
-    fileSize: 10 * 1024 * 1024, // Limit file size to 10MB per file
-  },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
-      cb(null, true);
-    } else {
-      cb(new Error(`Invalid file type: ${file.originalname}. Only PDF files are allowed.`), false);
-    }
-  },
+    dest: os.tmpdir(),
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+    },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+            cb(null, true);
+        } else {
+            cb(new Error(`Invalid file type: ${file.originalname}. Only PDF files are allowed.`), false);
+        }
+    },
 });
 
 // Multer error handling middleware
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        success: false,
-        error: `File too large: ${err.field}. Maximum size is 10MB.`,
-      });
+    if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(400).json({
+                success: false,
+                error: `File too large: ${err.field}. Maximum size is 10MB.`,
+            });
+        }
+        return res.status(400).json({
+            success: false,
+            error: err.message,
+        });
+    } else if (err) {
+        return res.status(400).json({
+            success: false,
+            error: err.message,
+        });
     }
-    return res.status(400).json({
-      success: false,
-      error: err.message,
-    });
-  } else if (err) {
-    return res.status(400).json({
-      success: false,
-      error: err.message,
-    });
-  }
-  next();
+    next();
 });
 
 // API Route for Resume Parsing
@@ -887,11 +857,11 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
 });
 
 app.post("/", (req, res) => {
-    return res.send({message: "hello from parse resume"});
+    return res.send({ message: "hello from parse resume" });
 });
 
 // Start the Express Server
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  console.log(`Resume parsing endpoint: POST http://localhost:${PORT}/parse-resumes`);
+    console.log(`Server is running on port ${PORT}`);
+    console.log(`Resume parsing endpoint: POST http://localhost:${PORT}/parse-resumes`);
 });
