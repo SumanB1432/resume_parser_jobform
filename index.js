@@ -706,11 +706,25 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
 // Express App Setup
 const app = express();
 const PORT = process.env.PORT || 3001;
+const allowedOrigins = [
+  'https://www.jobformautomator.com',
+  'https://jobformautomator.com',
+  'http://localhost:3000', // For local development
+  'http://localhost:5173', // Common for Vite/React dev servers
+];
+
 app.use(
   cors({
-    origin: 'https://www.jobformautomator.com/',
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type'],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g., non-browser clients like Postman)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   })
 );
