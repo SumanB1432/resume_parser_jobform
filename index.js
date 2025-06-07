@@ -805,9 +805,8 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
   console.log('POST request received to /parse-resumes');
   const tempFile = req.file;
   const jobDescription = req.body.jd || '';
-  const recruiterSuggestion = req.body.rs || '';
-  const isPremium = true; // Adjust based on your auth logic
-
+  const recruiterSuggestion = req.body.rs || '';  
+  const isPremium = req.body.status === 'true' || req.body.status === true;
   console.log(`User isPremium: ${isPremium}`);
 
   try {
