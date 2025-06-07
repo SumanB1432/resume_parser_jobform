@@ -708,7 +708,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(
   cors({
-    origin: 'www.jobformautomator.com',
+    origin: 'https://www.jobformautomator.com/',
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
     credentials: true,
