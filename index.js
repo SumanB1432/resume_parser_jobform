@@ -539,41 +539,22 @@ async function processInBatches(items, batchSize, processBatchFn) {
 // Process Resume Files
 const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion, isPremium) => {
   console.log(`Starting resume processing for ${multerFiles.length} file(s) received. Premium: ${isPremium}`);
-  const pdfParseFailedFiles = []; // Track PDFs that failed pdf-parse
+  const pdfParseFailedFiles = [];
 
+  // Check for API key and Firebase initialization
   if (!apiKey || admin.apps.length === 0 || !database || !bucket) {
     const reason = !apiKey ? 'Gemini API Key is not configured.' : 'Firebase Admin SDK failed to initialize.';
     console.error(`Cannot process files: ${reason}`);
-    const candidatesWithError = multerFiles.map((file) => {
-      const id = uuidv4();
-      const candidate = validateCandidate({
-        id: id,
-        name: reason.includes('Gemini') ? 'API Key Missing' : 'Service Error',
-        email: `${reason.includes('Gemini') ? 'api_key_missing' : 'service_error'}_${id}@example.com`,
-        phone: 'N/A',
-        location: 'N/A',
-        score: 0,
-        parsedText: `Processing skipped: ${reason} File: ${file.originalname}`,
-        skills: [],
-        experience: 0,
-        jobTitle: 'Error',
-        education: 'N/A',
-        resumeUrl: `File received: ${file.originalname}`,
-      });
-      if (admin.apps.length > 0 && database) {
-        saveCandidateToRealtimeDatabase(candidate).catch(console.error);
-      }
-      return candidate;
-    });
     return {
       success: false,
       totalProcessed: multerFiles.length,
-      candidates: candidatesWithError,
-      pdfParseFailedFiles, // Empty since no parsing attempted
+      candidates: [],
+      pdfParseFailedFiles,
       message: `Processing aborted: ${reason}`,
     };
   }
 
+  // Handle no files case
   if (multerFiles.length === 0) {
     console.log('No files provided to process.');
     return {
@@ -585,30 +566,22 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     };
   }
 
+  // Filter PDF and non-PDF files
   const pdfFiles = multerFiles.filter((file) => file.mimetype === 'application/pdf');
   const nonPdfFiles = multerFiles.filter((file) => file.mimetype !== 'application/pdf');
   if (nonPdfFiles.length > 0) {
     console.warn(`Skipping ${nonPdfFiles.length} non-PDF file entries.`);
     nonPdfFiles.forEach((file) => {
-      const id = uuidv4();
-      const candidate = validateCandidate({
-        id: id,
-        name: 'Invalid File Type',
-        email: `invalid_type_${id}@example.com`,
-        phone: 'N/A',
-        location: 'N/A',
-        score: 0,
-        parsedText: `Skipped processing due to invalid file type or data ('${file.originalname}', MIME: ${file.mimetype}). Only PDF files are supported.`,
-        skills: [],
-        experience: 0,
-        jobTitle: 'N/A',
-        education: 'N/A',
-        resumeUrl: `File received: ${file.originalname}`,
-      });
-      saveCandidateToRealtimeDatabase(candidate).catch(console.error);
+      pdfParseFailedFiles.push(file.originalname);
+      admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+        filename: file.originalname,
+        reason: 'Non-PDF file type',
+        timestamp: admin.database.ServerValue.TIMESTAMP,
+      }).catch((error) => console.error(`Failed to save ${file.originalname} to failed_pdf_parse: ${error.message}`));
     });
   }
 
+  // Handle no valid PDFs case
   if (pdfFiles.length === 0) {
     console.log('No valid PDF files found after filtering.');
     return {
@@ -632,37 +605,36 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       }
       const { path: filePath, originalname: filename } = file;
       console.log(`-> Processing file: ${filename} (Temp Path: ${filePath}, Size: ${file.size} bytes)`);
-      let candidate = null;
       const id = uuidv4();
       try {
         const { text, pdfParseFailed } = await extractTextWithFallback(filePath, filename, isPremium);
         if (pdfParseFailed) {
-          pdfParseFailedFiles.push(filename); // Track failed pdf-parse
+          pdfParseFailedFiles.push(filename);
+          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+            filename,
+            reason: 'pdf-parse failed',
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+          console.log(`-> Logged ${filename} to pdfParseFailedFiles and Firebase.`);
+          if (!isPremium) {
+            console.log(`-> Skipping ${filename} for free user due to pdf-parse failure.`);
+            continue; // Skip for free users without creating a candidate
+          }
         }
         if (!text || text.trim().length < 50) {
           console.warn(`Skipping file ${filename}: insufficient or invalid text content (${text?.length || 0} characters) after extraction.`);
-          candidate = validateCandidate({
-            id: id,
-            name: 'Insufficient Text',
-            email: `insufficient_text_${uuidv4()}@example.com`,
-            phone: 'N/A',
-            location: 'N/A',
-            score: 0,
-            parsedText: 'Could not extract enough text from the PDF, or the PDF format was unreadable.',
-            skills: [],
-            experience: 0,
-            jobTitle: 'N/A',
-            education: 'N/A',
-            resumeUrl: `File received: ${filename}`,
-          });
-          await saveCandidateToRealtimeDatabase(candidate);
-          batchResults.push(candidate);
-          console.log(`-> Skipped ${filename}, added insufficient text error entry.`);
-          continue;
+          pdfParseFailedFiles.push(filename);
+          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+            filename,
+            reason: 'Insufficient text extracted',
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+          console.log(`-> Logged ${filename} to pdfParseFailedFiles due to insufficient text.`);
+          continue; // Skip without creating a candidate
         }
         console.log(`-> Sending text from ${filename} to Gemini...`);
         const parsedCandidateData = await parseWithGemini(text, jobDescription, recruiterSuggestion);
-        candidate = validateCandidate({
+        const candidate = validateCandidate({
           ...parsedCandidateData,
           id: id,
           approved: false,
@@ -671,16 +643,19 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
         console.log(`-> Gemini parsing attempted for ${filename}. Result name: ${candidate.name}, Score: ${candidate.score}`);
         const geminiErrorNames = ['API Key Missing', 'API No Response', 'Empty AI Response', 'JSON Parse Failed', 'Content Blocked', 'Parsing Failed'];
         if (geminiErrorNames.includes(candidate.name)) {
-          console.warn(`-> Gemini returned a fatal error status for ${filename}: ${candidate.name}. Skipping upload.`);
-          await saveCandidateToRealtimeDatabase(candidate);
-          batchResults.push(candidate);
-          console.log(`-> Saved Gemini error candidate for ${filename}.`);
-          continue;
+          console.warn(`-> Gemini returned a fatal error status for ${filename}: ${candidate.name}. Skipping.`);
+          pdfParseFailedFiles.push(filename);
+          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+            filename,
+            reason: `Gemini parsing error: ${candidate.name}`,
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+          continue; // Skip without creating a candidate
         }
         try {
           const resumeUrl = await uploadToFirebaseStorage(filePath, filename, id);
           candidate.resumeUrl = resumeUrl;
-          console.log(`-> Uploaded ${filename}. URL: ${resumeUrl}`);
+          console.log(`-> Uploaded ${filename} to storage. URL: ${resumeUrl}`);
         } catch (uploadError) {
           console.error(`-> Failed to upload ${filename} to storage:`, uploadError);
           candidate.resumeUrl = 'Upload Failed';
@@ -692,37 +667,14 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       } catch (err) {
         const errorMessage = err.message || 'An unexpected error occurred during file processing.';
         console.error(`-> Error processing file ${filename}:`, errorMessage);
-        const errorCandidate = validateCandidate({
-          id: id,
-          name:
-            candidate && candidate.name !== 'N/A' && candidate.name !== 'Processing Error' && !geminiErrorNames.includes(candidate.name)
-              ? candidate.name
-              : 'Processing Error',
-          email:
-            candidate && candidate.email !== 'N/A' && !candidate.email.startsWith('processing_error_')
-              ? candidate.email
-              : `processing_error_${uuidv4()}@example.com`,
-          phone: candidate ? candidate.phone : 'N/A',
-          location: candidate ? candidate.location : 'N/A',
-          score: 0,
-          parsedText:
-            candidate && candidate.parsedText && candidate.parsedText !== 'No summary provided.'
-              ? `An error occurred during processing: ${errorMessage}\n\nOriginal summary: ${candidate.parsedText}`
-              : `An error occurred during processing this file ('${filename}'): ${errorMessage}`,
-          skills: candidate ? candidate.skills : [],
-          experience: candidate ? candidate.experience : 0,
-          jobTitle:
-            candidate && candidate.jobTitle !== 'N/A' && candidate.jobTitle !== 'Error' && !geminiErrorNames.includes(candidate.jobTitle)
-              ? candidate.jobTitle
-              : 'Error',
-          education: candidate ? candidate.education : 'N/A',
-          approved: false,
-          resumeUrl:
-            candidate && candidate.resumeUrl && candidate.resumeUrl !== 'N/A' && candidate.resumeUrl !== 'Upload Failed' ? candidate.resumeUrl : 'Processing Failed',
-        });
-        await saveCandidateToRealtimeDatabase(errorCandidate);
-        batchResults.push(errorCandidate);
-        console.log(`-> Added ${errorCandidate.id} to error candidate from ${filename}`);
+        pdfParseFailedFiles.push(filename);
+        await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+          filename,
+          reason: errorMessage.includes('pdf-parse') ? 'pdf-parse failed' : errorMessage,
+          timestamp: admin.database.ServerValue.TIMESTAMP,
+        }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+        console.log(`-> Logged ${filename} to pdfParseFailedFiles due to error: ${errorMessage}`);
+        continue; // Skip without creating a candidate
       } finally {
         try {
           await fsPromises.access(filePath);
@@ -746,7 +698,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     validPdfProcessed: candidates.length,
     invalidFilesSkipped: nonPdfFiles.length,
     candidates: sortedCandidates,
-    pdfParseFailedFiles, // Include failed PDFs in response
+    pdfParseFailedFiles,
     message: 'Processing complete.',
   };
 };
@@ -756,7 +708,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(
   cors({
-    origin: 'https://www.jobformautomator.com/',
+    origin: 'www.jobformautomator.com',
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
     credentials: true,
