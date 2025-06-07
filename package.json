@@ -19,6 +19,7 @@
   "homepage": "https://github.com/SumanB1432/parseresume_automator#readme",
   "description": "",
   "dependencies": {
+    "@adobe/pdfservices-node-sdk": "^4.1.0",
     "@google/generative-ai": "^0.24.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
@@ -27,6 +28,7 @@
     "multer": "^1.4.5-lts.2",
     "nodemon": "^3.1.10",
     "pdf-parse": "^1.1.1",
+    "unzipper": "^0.12.3",
     "uuid": "^11.1.0"
   }
 }

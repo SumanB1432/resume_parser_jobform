@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
-const fs = require('fs').promises;
-const nodeFs = require('fs');
+const fs = require('fs'); // Standard fs for streams
+const fsPromises = require('fs').promises; // Promises API for async file operations
 const os = require('os');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -9,8 +9,22 @@ const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pdf = require('pdf-parse');
 const admin = require('firebase-admin');
+const {
+    ServicePrincipalCredentials,
+    PDFServices,
+    MimeType,
+    ExtractPDFParams,
+    ExtractElementType,
+    ExtractPDFJob,
+    ExtractPDFResult,
+    SDKError,
+    ServiceUsageError,
+    ServiceApiError
+} = require('@adobe/pdfservices-node-sdk');
+const unzipper = require('unzipper');
 require('dotenv').config();
 
+// Firebase Initialization
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8')
 );
@@ -42,27 +56,140 @@ if (!apiKey) {
 const genAI = new GoogleGenerativeAI(apiKey || '');
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-const extractTextFromPdf = async (filePath, filename) => {
-  console.log(`Processing temp file: ${filePath} for ${filename}`);
+// Adobe PDF Text Extraction
+const extractTextFromPDF = async (inputFilePath, filename) => {
+  let readStream;
+  let outputZipPath = null; // Initialize to null
+  const startTime = performance.now();
   try {
-    const dataBuffer = await fs.readFile(filePath);
+    if (!process.env.PDF_SERVICES_CLIENT_ID || !process.env.PDF_SERVICES_CLIENT_SECRET) {
+      throw new Error("Missing or empty PDF_SERVICES_CLIENT_ID or PDF_SERVICES_CLIENT_SECRET in environment variables");
+    }
+    const credentials = new ServicePrincipalCredentials({
+      clientId: process.env.PDF_SERVICES_CLIENT_ID,
+      clientSecret: process.env.PDF_SERVICES_CLIENT_SECRET
+    });
+    const pdfServices = new PDFServices({ credentials });
+    readStream = fs.createReadStream(inputFilePath);
+    const inputAsset = await pdfServices.upload({
+      readStream,
+      mimeType: MimeType.PDF
+    });
+    const params = new ExtractPDFParams({
+      elementsToExtract: [ExtractElementType.TEXT]
+    });
+    const job = new ExtractPDFJob({ inputAsset, params });
+    const pollingURL = await pdfServices.submit({ job });
+    const pdfServicesResponse = await pdfServices.getJobResult({
+      pollingURL,
+      resultType: ExtractPDFResult,
+      timeout: 120000 // 120 seconds
+    });
+    const resultAsset = pdfServicesResponse.result.resource;
+    const streamAsset = await pdfServices.getContent({ asset: resultAsset });
+    outputZipPath = path.join(os.tmpdir(), `ExtractText_${Date.now()}_${filename}.zip`);
+    await fsPromises.mkdir(path.dirname(outputZipPath), { recursive: true });
+    const writeStream = fs.createWriteStream(outputZipPath);
+    await new Promise((resolve, reject) => {
+      streamAsset.readStream.pipe(writeStream)
+        .on('finish', resolve)
+        .on('error', reject);
+    });
+    const directory = await unzipper.Open.file(outputZipPath);
+    const jsonFile = directory.files.find(file => file.path === 'structuredData.json');
+    if (!jsonFile) throw new Error("structuredData.json not found in ZIP");
+    const jsonContent = await jsonFile.buffer();
+    const jsonData = JSON.parse(jsonContent.toString());
+    let extractedText = "";
+    if (jsonData.elements) {
+      jsonData.elements.forEach(element => {
+        if (element.Text) extractedText += element.Text + "\n";
+      });
+    }
+    const duration = (performance.now() - startTime) / 1000;
+    console.log(`Adobe extracted ${extractedText.length} chars from ${filename} in ${duration.toFixed(2)}s`);
+    if (!extractedText || extractedText.length < 50) {
+      throw new Error(`Insufficient text extracted: ${extractedText.length} chars`);
+    }
+    return extractedText.trim();
+  } catch (err) {
+    const duration = (performance.now() - startTime) / 1000;
+    if (err instanceof SDKError || err instanceof ServiceUsageError || err instanceof ServiceApiError) {
+      console.error(`Adobe SDK error for ${filename} after ${duration.toFixed(2)}s: ${err.message}`);
+    } else {
+      console.error(`Unexpected error for ${filename} after ${duration.toFixed(2)}s: ${err.message}`);
+    }
+    throw new Error(`Failed to extract text with Adobe SDK: ${err.message}`);
+  } finally {
+    if (readStream) {
+      try {
+        readStream.destroy();
+      } catch (err) {
+        console.error(`Error closing readStream for ${filename}: ${err.message}`);
+      }
+    }
+    if (outputZipPath && fs.existsSync(outputZipPath)) {
+      try {
+        await fsPromises.unlink(outputZipPath);
+        console.log(`Cleaned up Adobe ZIP file: ${outputZipPath}`);
+      } catch (cleanupErr) {
+        if (cleanupErr.code !== 'ENOENT') {
+          console.error(`Error cleaning up Adobe ZIP file ${outputZipPath} for ${filename}: ${cleanupErr.message}`);
+        }
+      }
+    }
+  }
+};
+
+// pdf-parse Text Extraction
+const extractTextFromPdf = async (filePath, filename) => {
+  console.log(`Processing temp file: ${filePath} for ${filename} with pdf-parse`);
+  try {
+    const dataBuffer = await fsPromises.readFile(filePath);
     const data = await pdf(dataBuffer);
     const extractedText = data.text.trim();
-    console.log(`Extracted text (${extractedText.length} chars) from ${filename}`);
+    console.log(`Extracted text (${extractedText.length} chars) from ${filename} using pdf-parse`);
     if (!extractedText || extractedText.length < 50) {
       console.warn(`Insufficient text extracted from ${filename}: ${extractedText.length} characters.`);
       throw new Error(`Insufficient or invalid text content extracted from ${filename}`);
     }
+    console.log("text",extractedText)
     return extractedText;
   } catch (error) {
     console.error(`pdf-parse error for ${filename}:`, error.message);
     if (error.message.includes('Invalid PDF structure') || error.message.includes('Corrupted')) {
       throw new Error(`Invalid or corrupted PDF file: ${filename}`);
     }
-    throw new Error(`Failed to parse PDF: ${error.message}`);
+    throw new Error(`Failed to parse PDF with pdf-parse: ${error.message}`);
   }
 };
 
+// Combined Text Extraction with Fallback for Premium Users
+const extractTextWithFallback = async (filePath, filename, isPremium) => {
+  let pdfParseFailed = false;
+  try {
+    const text = await extractTextFromPdf(filePath, filename);
+    return { text, pdfParseFailed };
+  } catch (error) {
+    console.warn(`pdf-parse failed for ${filename}: ${error.message}`);
+    pdfParseFailed = true;
+    if (isPremium) {
+      console.log(`Falling back to Adobe PDF Services for premium user: ${filename}`);
+      try {
+        const adobeText = await extractTextFromPDF(filePath, filename);
+        return { text: adobeText, pdfParseFailed };
+      } catch (adobeError) {
+        console.error(`Adobe parsing also failed for ${filename}: ${adobeError.message}`);
+        throw new Error(`Both pdf-parse and Adobe failed: ${adobeError.message}`);
+      }
+    } else {
+      console.log(`Not using Adobe fallback for free user: ${filename}`);
+      throw error;
+    }
+  }
+};
+
+// Clean Gemini JSON Response
 const cleanGeminiJson = (raw) => {
   let cleaned = raw.trim();
   if (cleaned.startsWith('```json')) {
@@ -78,6 +205,7 @@ const cleanGeminiJson = (raw) => {
   return cleaned;
 };
 
+// Validate Candidate Data
 const validateCandidate = (candidateData) => {
   candidateData = candidateData || {};
   const emailInput = candidateData.email && typeof candidateData.email === 'string' ? candidateData.email.trim().toLowerCase() : '';
@@ -122,12 +250,14 @@ const validateCandidate = (candidateData) => {
   };
 };
 
+// Extract Email from Text
 const extractEmailFromText = (text) => {
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const matches = text.match(emailRegex);
   return matches && matches.length > 0 ? matches[0].toLowerCase() : null;
 };
 
+// Parse Resume with Gemini
 const parseWithGemini = async (text, jobDescription, recruiterSuggestion) => {
   const prompt = `
 You are an Advanced AI Resume Evaluator.
@@ -188,9 +318,9 @@ Return only a JSON object adhering strictly to the following structure. Do not i
   "score": /* Calculated final score (0-100) */,
   "parsedText": "Concise summary explaining the score, highlighting specific strengths and weaknesses based on JD and RS alignment.",
   "skills": [ /* List of relevant skills extracted from the resume that match JD/RS requirements */ ],
-  "experienceYears": /* Total years of relevant experience inferred/extracted from resume */,
+  "experienceYears": /* Total years of relevant experience inferred, extracted from resume */,
   "jobTitle": "Most recent relevant job title (Extract from resume)",
-  "education": "Highest relevant degree/qualification (Extract from resume)"
+  "education": "Harmonized highest relevant degree/qualification (Extract from resume)"
 }
 \`\`\`
 `;
@@ -323,6 +453,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
   }
 };
 
+// Upload to Firebase Storage
 const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
   try {
     const originalFileName = filename || `resume-${candidateId}.pdf`;
@@ -339,7 +470,7 @@ const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
     });
 
     await new Promise((resolve, reject) => {
-      const readStream = nodeFs.createReadStream(filePath);
+      const readStream = fs.createReadStream(filePath);
       readStream
         .pipe(uploadStream)
         .on('error', reject)
@@ -355,6 +486,7 @@ const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
   }
 };
 
+// Save Candidate to Realtime Database
 const saveCandidateToRealtimeDatabase = async (candidate) => {
   try {
     if (candidate.name === 'API Key Missing') {
@@ -387,6 +519,7 @@ const saveCandidateToRealtimeDatabase = async (candidate) => {
   }
 };
 
+// Process Files in Batches
 async function processInBatches(items, batchSize, processBatchFn) {
   const results = [];
   const totalBatches = Math.ceil(items.length / batchSize);
@@ -403,8 +536,11 @@ async function processInBatches(items, batchSize, processBatchFn) {
   return results;
 }
 
-const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion) => {
-  console.log(`Starting resume processing for ${multerFiles.length} file(s) received.`);
+// Process Resume Files
+const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion, isPremium) => {
+  console.log(`Starting resume processing for ${multerFiles.length} file(s) received. Premium: ${isPremium}`);
+  const pdfParseFailedFiles = []; // Track PDFs that failed pdf-parse
+
   if (!apiKey || admin.apps.length === 0 || !database || !bucket) {
     const reason = !apiKey ? 'Gemini API Key is not configured.' : 'Firebase Admin SDK failed to initialize.';
     console.error(`Cannot process files: ${reason}`);
@@ -426,28 +562,29 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       });
       if (admin.apps.length > 0 && database) {
         saveCandidateToRealtimeDatabase(candidate).catch(console.error);
-      } else {
-        console.error(`Could not save error entry for ${file.originalname}: Firebase Database not initialized.`);
       }
       return candidate;
     });
-    console.log(`Created error entries for all files due to: ${reason}`);
     return {
       success: false,
       totalProcessed: multerFiles.length,
       candidates: candidatesWithError,
+      pdfParseFailedFiles, // Empty since no parsing attempted
       message: `Processing aborted: ${reason}`,
     };
   }
+
   if (multerFiles.length === 0) {
     console.log('No files provided to process.');
     return {
       success: true,
       totalProcessed: 0,
       candidates: [],
+      pdfParseFailedFiles,
       message: 'No files were provided for processing.',
     };
   }
+
   const pdfFiles = multerFiles.filter((file) => file.mimetype === 'application/pdf');
   const nonPdfFiles = multerFiles.filter((file) => file.mimetype !== 'application/pdf');
   if (nonPdfFiles.length > 0) {
@@ -471,6 +608,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       saveCandidateToRealtimeDatabase(candidate).catch(console.error);
     });
   }
+
   if (pdfFiles.length === 0) {
     console.log('No valid PDF files found after filtering.');
     return {
@@ -479,9 +617,11 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       validPdfProcessed: 0,
       invalidFilesSkipped: nonPdfFiles.length,
       candidates: [],
+      pdfParseFailedFiles,
       message: 'No valid PDF files were provided for processing.',
     };
   }
+
   console.log(`Found ${pdfFiles.length} valid PDF files to process.`);
   const candidates = await processInBatches(pdfFiles, 5, async (batch) => {
     const batchResults = [];
@@ -495,7 +635,10 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
       let candidate = null;
       const id = uuidv4();
       try {
-        const text = await extractTextFromPdf(filePath, filename);
+        const { text, pdfParseFailed } = await extractTextWithFallback(filePath, filename, isPremium);
+        if (pdfParseFailed) {
+          pdfParseFailedFiles.push(filename); // Track failed pdf-parse
+        }
         if (!text || text.trim().length < 50) {
           console.warn(`Skipping file ${filename}: insufficient or invalid text content (${text?.length || 0} characters) after extraction.`);
           candidate = validateCandidate({
@@ -582,8 +725,8 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
         console.log(`-> Added ${errorCandidate.id} to error candidate from ${filename}`);
       } finally {
         try {
-          await fs.access(filePath);
-          await fs.unlink(filePath);
+          await fsPromises.access(filePath);
+          await fsPromises.unlink(filePath);
           console.log(`Cleaned up temp file: ${filePath}`);
         } catch (cleanupErr) {
           if (cleanupErr.code !== 'ENOENT') {
@@ -594,6 +737,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     }
     return batchResults;
   });
+
   const sortedCandidates = candidates.sort((a, b) => b.score - a.score);
   console.log(`\n--- Finished processing ${candidates.length} valid PDF file(s). ---\n`);
   return {
@@ -602,23 +746,24 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     validPdfProcessed: candidates.length,
     invalidFilesSkipped: nonPdfFiles.length,
     candidates: sortedCandidates,
+    pdfParseFailedFiles, // Include failed PDFs in response
     message: 'Processing complete.',
   };
 };
 
-// --- Express App Setup ---
+// Express App Setup
 const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(
   cors({
-    origin: 'https://www.jobformautomator.com',
+    origin: 'https://www.jobformautomator.com/',
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
     credentials: true,
   })
 );
 
-// Configure multer for single file upload
+// Configure Multer for Single File Upload
 const upload = multer({
   dest: os.tmpdir(),
   limits: {
@@ -633,7 +778,7 @@ const upload = multer({
   },
 });
 
-// Multer error handling middleware
+// Multer Error Handling Middleware
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -661,6 +806,9 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
   const tempFile = req.file;
   const jobDescription = req.body.jd || '';
   const recruiterSuggestion = req.body.rs || '';
+  const isPremium = true; // Adjust based on your auth logic
+
+  console.log(`User isPremium: ${isPremium}`);
 
   try {
     if (!tempFile) {
@@ -668,6 +816,7 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'No file uploaded. Please upload a PDF file with the field name \'file\'.',
+        pdfParseFailedFiles: [],
       });
     }
 
@@ -697,32 +846,34 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
       return res.status(400).json({
         success: false,
         candidate,
+        pdfParseFailedFiles: [],
         error: reason,
       });
     }
 
-    // Call processResumeFiles with single-item array to reuse existing logic
-    const results = await processResumeFiles([tempFile], jobDescription, recruiterSuggestion);
+    const results = await processResumeFiles([tempFile], jobDescription, recruiterSuggestion, isPremium);
     const candidate = results.candidates[0] || null;
 
     if (!candidate) {
       return res.status(500).json({
         success: false,
         error: 'Failed to process file: No candidate data returned.',
+        pdfParseFailedFiles: results.pdfParseFailedFiles,
       });
     }
 
     res.status(200).json({
       success: true,
-      candidate: candidate,
+      candidate,
+      pdfParseFailedFiles: results.pdfParseFailedFiles,
     });
   } catch (error) {
     const errorMessage = error.message || 'Unexpected error during processing.';
     console.error('[Overall Request Error]', errorMessage, error);
     if (tempFile && tempFile.path) {
       try {
-        await fs.access(tempFile.path);
-        await fs.unlink(tempFile.path);
+        await fsPromises.access(tempFile.path);
+        await fsPromises.unlink(tempFile.path);
         console.log(`Cleaned up temp file: ${tempFile.path}`);
       } catch (cleanupErr) {
         if (cleanupErr.code !== 'ENOENT') {
@@ -733,6 +884,7 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
     res.status(500).json({
       success: false,
       error: errorMessage,
+      pdfParseFailedFiles: [],
     });
   }
 });
