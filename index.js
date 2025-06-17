@@ -215,8 +215,8 @@ const validateCandidate = (candidateData) => {
     typeof candidateData.name === 'string' &&
     candidateData.name.trim() !== '' &&
     candidateData.name.trim().toLowerCase() !== 'n/a'
-      ? `${candidateData.name.trim().replace(/\s+/g, '').toLowerCase()}@gmail.com`
-      : `unknown_${uuidv4()}@gmail.com`;
+      ? `Email Not Found`
+      : `Email Not Found`;
   const email = emailInput && emailRegex.test(emailInput) ? emailInput : fallbackEmailFromName;
   return {
     id: candidateData.id || uuidv4(),
@@ -312,7 +312,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
 \`\`\`json
 {
   "name": "Candidate Name (Extract from resume)",
-  "email": "example@email.com (Extract from resume)",
+  "email": "example@gmail.com (Extract from resume)",
   "phone": "+1234567890 (Extract from resume)",
   "location": "City, State/Country (Extract from resume)",
   "score": /* Calculated final score (0-100) */,
@@ -330,7 +330,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Gemini API key is not configured within parseWithGemini. Skipping Gemini call.');
       return {
         name: 'API Key Missing',
-        email: `api_key_missing_${uuidv4()}@example.com`,
+        email: `N/A`,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -360,7 +360,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Gemini API returned an unexpected empty result or response format.');
       return {
         name: 'API No Response',
-        email: extractedEmail || `api_no_response_${uuidv4()}@example.com`,
+        email: extractedEmail || `N/A`,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -379,7 +379,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Gemini Raw Output (before cleaning):', raw);
       return {
         name: 'Empty AI Response',
-        email: extractedEmail || `empty_ai_response_${uuidv4()}@example.com`,
+        email: extractedEmail || `N/A`,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -410,7 +410,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Raw output causing JSON parse error (partial):', cleaned.substring(0, 500) + '...');
       return {
         name: 'JSON Parse Failed',
-        email: extractedEmail || `json_parse_failed_${uuidv4()}@example.com`,
+        email: extractedEmail || `N/A`,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -427,7 +427,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Gemini blocked content due to safety ratings.');
       return {
         name: 'Content Blocked',
-        email: extractedEmail || `content_blocked_${uuidv4()}@example.com`,
+        email: extractedEmail || `N/A`,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -440,7 +440,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
     }
     return {
       name: 'Parsing Failed',
-      email: extractedEmail || `parsing_failed_${uuidv4()}@example.com`,
+      email: extractedEmail || `N/A`,
       phone: 'N/A',
       location: 'N/A',
       score: 0,
@@ -668,11 +668,11 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
         const errorMessage = err.message || 'An unexpected error occurred during file processing.';
         console.error(`-> Error processing file ${filename}:`, errorMessage);
         pdfParseFailedFiles.push(filename);
-        await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
-          filename,
-          reason: errorMessage.includes('pdf-parse') ? 'pdf-parse failed' : errorMessage,
-          timestamp: admin.database.ServerValue.TIMESTAMP,
-        }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+        // await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+        //   filename,
+        //   reason: errorMessage.includes('pdf-parse') ? 'pdf-parse failed' : errorMessage,
+        //   timestamp: admin.database.ServerValue.TIMESTAMP,
+        // }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
         console.log(`-> Logged ${filename} to pdfParseFailedFiles due to error: ${errorMessage}`);
         continue; // Skip without creating a candidate
       } finally {
