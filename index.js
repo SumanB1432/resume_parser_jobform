@@ -354,7 +354,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       textForGemini = text.substring(0, MAX_TEXT_CHARS);
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-001' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const result = await model.generateContent(prompt);
     if (!result || !result.response || typeof result.response.text !== 'function') {
       console.error('Gemini API returned an unexpected empty result or response format.');
