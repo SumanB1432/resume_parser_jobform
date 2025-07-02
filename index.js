@@ -10,16 +10,16 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pdf = require('pdf-parse');
 const admin = require('firebase-admin');
 const {
-    ServicePrincipalCredentials,
-    PDFServices,
-    MimeType,
-    ExtractPDFParams,
-    ExtractElementType,
-    ExtractPDFJob,
-    ExtractPDFResult,
-    SDKError,
-    ServiceUsageError,
-    ServiceApiError
+  ServicePrincipalCredentials,
+  PDFServices,
+  MimeType,
+  ExtractPDFParams,
+  ExtractElementType,
+  ExtractPDFJob,
+  ExtractPDFResult,
+  SDKError,
+  ServiceUsageError,
+  ServiceApiError
 } = require('@adobe/pdfservices-node-sdk');
 const unzipper = require('unzipper');
 require('dotenv').config();
@@ -49,11 +49,6 @@ if (admin.apps.length === 0) {
 
 const database = admin.database();
 const bucket = admin.storage().bucket();
-const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-if (!apiKey) {
-  console.error('FATAL ERROR: NEXT_PUBLIC_GEMINI_API_KEY is not set in your .env file.');
-}
-const genAI = new GoogleGenerativeAI(apiKey || '');
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
 // Adobe PDF Text Extraction
@@ -153,7 +148,7 @@ const extractTextFromPdf = async (filePath, filename) => {
       console.warn(`Insufficient text extracted from ${filename}: ${extractedText.length} characters.`);
       throw new Error(`Insufficient or invalid text content extracted from ${filename}`);
     }
-    console.log("text",extractedText)
+    console.log("text", extractedText)
     return extractedText;
   } catch (error) {
     console.error(`pdf-parse error for ${filename}:`, error.message);
@@ -212,9 +207,9 @@ const validateCandidate = (candidateData) => {
   const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
   const fallbackEmailFromName =
     candidateData.name &&
-    typeof candidateData.name === 'string' &&
-    candidateData.name.trim() !== '' &&
-    candidateData.name.trim().toLowerCase() !== 'n/a'
+      typeof candidateData.name === 'string' &&
+      candidateData.name.trim() !== '' &&
+      candidateData.name.trim().toLowerCase() !== 'n/a'
       ? `Email Not Found`
       : `Email Not Found`;
   const email = emailInput && emailRegex.test(emailInput) ? emailInput : fallbackEmailFromName;
@@ -258,7 +253,7 @@ const extractEmailFromText = (text) => {
 };
 
 // Parse Resume with Gemini
-const parseWithGemini = async (text, jobDescription, recruiterSuggestion) => {
+const parseWithGemini = async (text, jobDescription, recruiterSuggestion, apiKey) => {
   const prompt = `
 You are an Advanced AI Resume Evaluator.
 
@@ -353,6 +348,10 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.warn(`Resume text length (${text.length} chars) exceeds approximate limit (${MAX_TEXT_CHARS} chars). Truncating resume text for prompt.`);
       textForGemini = text.substring(0, MAX_TEXT_CHARS);
     }
+    if (!apiKey) {
+      console.error('FATAL ERROR: NEXT_PUBLIC_GEMINI_API_KEY is not set in your .env file.');
+    }
+    const genAI = new GoogleGenerativeAI(apiKey || '');
 
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const result = await model.generateContent(prompt);
@@ -537,7 +536,7 @@ async function processInBatches(items, batchSize, processBatchFn) {
 }
 
 // Process Resume Files
-const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion, isPremium) => {
+const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion, isPremium, apiKey) => {
   console.log(`Starting resume processing for ${multerFiles.length} file(s) received. Premium: ${isPremium}`);
   const pdfParseFailedFiles = [];
 
@@ -633,7 +632,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
           continue; // Skip without creating a candidate
         }
         console.log(`-> Sending text from ${filename} to Gemini...`);
-        const parsedCandidateData = await parseWithGemini(text, jobDescription, recruiterSuggestion);
+        const parsedCandidateData = await parseWithGemini(text, jobDescription, recruiterSuggestion, apiKey);
         const candidate = validateCandidate({
           ...parsedCandidateData,
           id: id,
@@ -771,9 +770,11 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
   console.log('POST request received to /parse-resumes');
   const tempFile = req.file;
   const jobDescription = req.body.jd || '';
-  const recruiterSuggestion = req.body.rs || '';  
+  const recruiterSuggestion = req.body.rs || '';
   const isPremium = req.body.status === 'true' || req.body.status === true;
+  const apiKey = req.body.api_key;
   console.log(`User isPremium: ${isPremium}`);
+  console.log("api_key",apiKey)
 
   try {
     if (!tempFile) {
@@ -816,7 +817,7 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
       });
     }
 
-    const results = await processResumeFiles([tempFile], jobDescription, recruiterSuggestion, isPremium);
+    const results = await processResumeFiles([tempFile], jobDescription, recruiterSuggestion, isPremium, apiKey);
     const candidate = results.candidates[0] || null;
 
     if (!candidate) {
