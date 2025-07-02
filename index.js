@@ -708,17 +708,17 @@ const PORT = process.env.PORT || 3001;
 const allowedOrigins = [
   'https://www.jobformautomator.com',
   'https://jobformautomator.com',
-  'http://localhost:3000', // For local development
-  'http://localhost:5173', // Common for Vite/React dev servers
+  'http://localhost:3000',
+  'http://localhost:5173',
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g., non-browser clients like Postman)
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.some(allowed => origin === allowed)) {
         callback(null, true);
       } else {
+        console.log('Blocked Origin:', origin);
         callback(new Error('Not allowed by CORS'));
       }
     },
@@ -727,7 +727,6 @@ app.use(
     credentials: true,
   })
 );
-
 // Configure Multer for Single File Upload
 const upload = multer({
   dest: os.tmpdir(),
