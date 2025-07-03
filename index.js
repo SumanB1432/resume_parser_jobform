@@ -253,8 +253,8 @@ const extractEmailFromText = (text) => {
 };
 
 // Parse Resume with Gemini
-const parseWithGemini = async (text, jobDescription, recruiterSuggestion, apiKey) => {
-  const prompt = `
+async function parseWithGemini(text, jobDescription, recruiterSuggestion, apiKey) {
+     const prompt = `
 You are an Advanced AI Resume Evaluator.
 
 Your Task:
@@ -319,13 +319,16 @@ Return only a JSON object adhering strictly to the following structure. Do not i
 }
 \`\`\`
 `;
-
   try {
+    // Initialize extractedEmail to prevent ReferenceError
+    const extractedEmail = extractEmailFromText(text) || 'N/A';
+
     if (!apiKey) {
       console.error('Gemini API key is not configured within parseWithGemini. Skipping Gemini call.');
       return {
+        status: 400,
         name: 'API Key Missing',
-        email: `N/A`,
+        email: extractedEmail,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -337,7 +340,6 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       };
     }
 
-    const extractedEmail = extractEmailFromText(text);
     const SAFETY_MARGIN_TOKENS = 5000;
     const approxPromptTokens = Math.ceil((prompt.length + jobDescription.length + recruiterSuggestion.length) / 4);
     const MAX_TEXT_TOKENS = 1000000 - approxPromptTokens - SAFETY_MARGIN_TOKENS;
@@ -348,18 +350,15 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.warn(`Resume text length (${text.length} chars) exceeds approximate limit (${MAX_TEXT_CHARS} chars). Truncating resume text for prompt.`);
       textForGemini = text.substring(0, MAX_TEXT_CHARS);
     }
-    if (!apiKey) {
-      console.error('FATAL ERROR: NEXT_PUBLIC_GEMINI_API_KEY is not set in your .env file.');
-    }
     const genAI = new GoogleGenerativeAI(apiKey || '');
-
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const result = await model.generateContent(prompt);
     if (!result || !result.response || typeof result.response.text !== 'function') {
       console.error('Gemini API returned an unexpected empty result or response format.');
       return {
+        status: 500,
         name: 'API No Response',
-        email: extractedEmail || `N/A`,
+        email: extractedEmail,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -377,8 +376,9 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Gemini returned empty or whitespace-only content after cleaning.');
       console.error('Gemini Raw Output (before cleaning):', raw);
       return {
+        status: 500,
         name: 'Empty AI Response',
-        email: extractedEmail || `N/A`,
+        email: extractedEmail,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -393,6 +393,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
     try {
       const parsed = JSON.parse(cleaned);
       return {
+        status: 200,
         name: parsed.name || 'N/A',
         email: extractedEmail || parsed.email || 'N/A',
         phone: parsed.phone || 'N/A',
@@ -408,8 +409,9 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       console.error('Failed to parse Gemini output as JSON:', jsonParseError);
       console.error('Raw output causing JSON parse error (partial):', cleaned.substring(0, 500) + '...');
       return {
+        status: 500,
         name: 'JSON Parse Failed',
-        email: extractedEmail || `N/A`,
+        email: extractedEmail,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -422,11 +424,33 @@ Return only a JSON object adhering strictly to the following structure. Do not i
     }
   } catch (error) {
     console.error('Gemini parsing failed with API error:', error.message, error);
+    const extractedEmail = text ? extractEmailFromText(text) || 'N/A' : 'N/A';
+    // Check for 429 error
+    if (error.status === 429 || (error.response && error.response.status === 429)) {
+      const retryDelay = error.response?.data?.error?.details?.find(
+        (detail) => detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
+      )?.retryDelay || 'unknown';
+      return {
+        status: 429,
+        name: 'Parsing Failed',
+        email: extractedEmail,
+        phone: 'N/A',
+        location: 'N/A',
+        score: 0,
+        parsedText: `Automatic parsing failed: 429 Too Many Requests.`,
+        retryDelay, // Include retryDelay directly
+        skills: [],
+        experienceYears: 0,
+        jobTitle: 'Parsing Failed',
+        education: 'N/A',
+      };
+    }
     if (error instanceof Error && error.message.includes('safety ratings')) {
       console.error('Gemini blocked content due to safety ratings.');
       return {
+        status: 403,
         name: 'Content Blocked',
-        email: extractedEmail || `N/A`,
+        email: extractedEmail,
         phone: 'N/A',
         location: 'N/A',
         score: 0,
@@ -438,8 +462,9 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       };
     }
     return {
+      status: 500,
       name: 'Parsing Failed',
-      email: extractedEmail || `N/A`,
+      email: extractedEmail,
       phone: 'N/A',
       location: 'N/A',
       score: 0,
@@ -450,7 +475,7 @@ Return only a JSON object adhering strictly to the following structure. Do not i
       education: 'N/A',
     };
   }
-};
+}
 
 // Upload to Firebase Storage
 const uploadToFirebaseStorage = async (filePath, filename, candidateId) => {
@@ -536,7 +561,7 @@ async function processInBatches(items, batchSize, processBatchFn) {
 }
 
 // Process Resume Files
-const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggestion, isPremium, apiKey) => {
+async function processResumeFiles(multerFiles, jobDescription, recruiterSuggestion, isPremium, apiKey) {
   console.log(`Starting resume processing for ${multerFiles.length} file(s) received. Premium: ${isPremium}`);
   const pdfParseFailedFiles = [];
 
@@ -617,7 +642,7 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
           console.log(`-> Logged ${filename} to pdfParseFailedFiles and Firebase.`);
           if (!isPremium) {
             console.log(`-> Skipping ${filename} for free user due to pdf-parse failure.`);
-            continue; // Skip for free users without creating a candidate
+            continue;
           }
         }
         if (!text || text.trim().length < 50) {
@@ -629,10 +654,47 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
             timestamp: admin.database.ServerValue.TIMESTAMP,
           }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
           console.log(`-> Logged ${filename} to pdfParseFailedFiles due to insufficient text.`);
-          continue; // Skip without creating a candidate
+          continue;
         }
         console.log(`-> Sending text from ${filename} to Gemini...`);
         const parsedCandidateData = await parseWithGemini(text, jobDescription, recruiterSuggestion, apiKey);
+        // Check for Gemini errors using the status field
+        if (parsedCandidateData.status === 429) {
+          console.warn(`-> Skipping ${filename} due to Gemini API quota exceeded.`);
+          pdfParseFailedFiles.push(filename);
+          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+            filename,
+            reason: 'Gemini API quota exceeded',
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+          batchResults.push({
+            error: {
+              status: 429,
+              message: parsedCandidateData.parsedText,
+              filename,
+              retryDelay: parsedCandidateData.retryDelay || 'unknown',
+            },
+          });
+          continue;
+        }
+        if (parsedCandidateData.status !== 200) {
+          console.warn(`-> Gemini returned an error status for ${filename}: ${parsedCandidateData.name}.`);
+          pdfParseFailedFiles.push(filename);
+          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+            filename,
+            reason: `Gemini parsing error: ${parsedCandidateData.name}`,
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+          batchResults.push({
+            error: {
+              status: parsedCandidateData.status,
+              message: parsedCandidateData.parsedText,
+              filename,
+              retryDelay: parsedCandidateData.retryDelay || 'unknown',
+            },
+          });
+          continue;
+        }
         const candidate = validateCandidate({
           ...parsedCandidateData,
           id: id,
@@ -640,17 +702,6 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
           resumeUrl: 'N/A',
         });
         console.log(`-> Gemini parsing attempted for ${filename}. Result name: ${candidate.name}, Score: ${candidate.score}`);
-        const geminiErrorNames = ['API Key Missing', 'API No Response', 'Empty AI Response', 'JSON Parse Failed', 'Content Blocked', 'Parsing Failed'];
-        if (geminiErrorNames.includes(candidate.name)) {
-          console.warn(`-> Gemini returned a fatal error status for ${filename}: ${candidate.name}. Skipping.`);
-          pdfParseFailedFiles.push(filename);
-          await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
-            filename,
-            reason: `Gemini parsing error: ${candidate.name}`,
-            timestamp: admin.database.ServerValue.TIMESTAMP,
-          }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
-          continue; // Skip without creating a candidate
-        }
         try {
           const resumeUrl = await uploadToFirebaseStorage(filePath, filename, id);
           candidate.resumeUrl = resumeUrl;
@@ -667,13 +718,19 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
         const errorMessage = err.message || 'An unexpected error occurred during file processing.';
         console.error(`-> Error processing file ${filename}:`, errorMessage);
         pdfParseFailedFiles.push(filename);
-        // await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
-        //   filename,
-        //   reason: errorMessage.includes('pdf-parse') ? 'pdf-parse failed' : errorMessage,
-        //   timestamp: admin.database.ServerValue.TIMESTAMP,
-        // }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
-        console.log(`-> Logged ${filename} to pdfParseFailedFiles due to error: ${errorMessage}`);
-        continue; // Skip without creating a candidate
+        await admin.database().ref(`failed_pdf_parse/${uuidv4()}`).set({
+          filename,
+          reason: errorMessage.includes('pdf-parse') ? 'pdf-parse failed' : errorMessage,
+          timestamp: admin.database.ServerValue.TIMESTAMP,
+        }).catch((error) => console.error(`Failed to save ${filename} to failed_pdf_parse: ${error.message}`));
+        batchResults.push({
+          error: {
+            status: err.status || 500,
+            message: errorMessage,
+            filename,
+          },
+        });
+        continue;
       } finally {
         try {
           await fsPromises.access(filePath);
@@ -689,19 +746,20 @@ const processResumeFiles = async (multerFiles, jobDescription, recruiterSuggesti
     return batchResults;
   });
 
-  const sortedCandidates = candidates.sort((a, b) => b.score - a.score);
+  const sortedCandidates = candidates.filter((item) => !item.error).sort((a, b) => b.score - a.score);
+  const errors = candidates.filter((item) => item.error);
   console.log(`\n--- Finished processing ${candidates.length} valid PDF file(s). ---\n`);
   return {
-    success: true,
+    success: errors.length === 0,
     totalProcessed: multerFiles.length,
     validPdfProcessed: candidates.length,
     invalidFilesSkipped: nonPdfFiles.length,
     candidates: sortedCandidates,
     pdfParseFailedFiles,
-    message: 'Processing complete.',
+    message: errors.length > 0 ? 'Processing completed with errors.' : 'Processing complete.',
+    errors,
   };
-};
-
+}
 // Express App Setup
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -765,6 +823,8 @@ app.use((err, req, res, next) => {
 });
 
 // API Route for Resume Parsing
+
+
 app.post('/parse-resumes', upload.single('file'), async (req, res) => {
   console.log('POST request received to /parse-resumes');
   const tempFile = req.file;
@@ -773,7 +833,7 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
   const isPremium = req.body.status === 'true' || req.body.status === true;
   const apiKey = req.body.api_key;
   console.log(`User isPremium: ${isPremium}`);
-  console.log("api_key",apiKey)
+  console.log('api_key', apiKey);
 
   try {
     if (!tempFile) {
@@ -789,7 +849,7 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
     console.log('JD (partial):', jobDescription.substring(0, Math.min(jobDescription.length, 100)) + (jobDescription.length > 100 ? '...' : ''));
     console.log('RS (partial):', recruiterSuggestion.substring(0, Math.min(recruiterSuggestion.length, 100)) + (recruiterSuggestion.length > 100 ? '...' : ''));
 
-    if (!apiKey || admin.apps.length === 0 || !database || !bucket) {
+    if (!apiKey || admin.apps.length === 0 || !admin.database() || !admin.storage().bucket()) {
       const reason = !apiKey ? 'Gemini API Key is not configured.' : 'Firebase Admin SDK failed to initialize.';
       console.error(`Cannot process file: ${reason}`);
       const id = uuidv4();
@@ -817,24 +877,64 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
     }
 
     const results = await processResumeFiles([tempFile], jobDescription, recruiterSuggestion, isPremium, apiKey);
+    // Log results.errors in the requested format, with a guard for empty errors
+    console.log("result", "suman", results.errors && results.errors[0] ? results.errors[0].error.status : 'no errors');
+
+    // Check for 429 errors in results
+    if (results.errors && results.errors.some((err) => err.error.status === 429)) {
+      const errorDetails = results.errors.find((err) => err.error.status === 429);
+      console.error(
+        `[Gemini 429 Error in /parse-resumes] File: ${errorDetails.error.filename}, Message: ${errorDetails.error.message}, Retry after: ${errorDetails.error.retryDelay}`
+      );
+      return res.status(429).json({
+        success: false,
+        error: 'Quota exceeded for Gemini API',
+        message: 'You’ve exceeded the daily request limit. Please upgrade your Gemini API plan or try again later.',
+        retryAfter: errorDetails.error.retryDelay || 'unknown',
+        pdfParseFailedFiles: results.pdfParseFailedFiles || [],
+        candidate: null,
+      });
+    }
+
     const candidate = results.candidates[0] || null;
 
     if (!candidate) {
+      console.error('[Error in /parse-resumes] No candidate data returned for file:', tempFile.originalname);
       return res.status(500).json({
         success: false,
         error: 'Failed to process file: No candidate data returned.',
-        pdfParseFailedFiles: results.pdfParseFailedFiles,
+        pdfParseFailedFiles: results.pdfParseFailedFiles || [],
       });
     }
 
     res.status(200).json({
       success: true,
       candidate,
-      pdfParseFailedFiles: results.pdfParseFailedFiles,
+      pdfParseFailedFiles: results.pdfParseFailedFiles || [],
     });
   } catch (error) {
     const errorMessage = error.message || 'Unexpected error during processing.';
-    console.error('[Overall Request Error]', errorMessage, error);
+    console.error('[Overall Request Error in /parse-resumes]', errorMessage, error);
+
+    // Check for 429 error from Gemini API
+    if (error.status === 429 || (error.response && error.response.status === 429)) {
+      const retryDelay = error.response?.data?.error?.details?.find(
+        (detail) => detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
+      )?.retryDelay || 'unknown';
+      console.error(
+        `[Gemini 429 Error in /parse-resumes] File: ${tempFile?.originalname || 'unknown'}, Message: ${errorMessage}, Retry after: ${retryDelay}`
+      );
+      return res.status(429).json({
+        success: false,
+        error: 'Quota exceeded for Gemini API',
+        message: 'You’ve exceeded the daily request limit. Please upgrade your Gemini API plan or try again later.',
+        retryAfter: retryDelay,
+        pdfParseFailedFiles: [],
+        candidate: null,
+      });
+    }
+
+    // Clean up temp file
     if (tempFile && tempFile.path) {
       try {
         await fsPromises.access(tempFile.path);
@@ -846,10 +946,12 @@ app.post('/parse-resumes', upload.single('file'), async (req, res) => {
         }
       }
     }
+
     res.status(500).json({
       success: false,
       error: errorMessage,
       pdfParseFailedFiles: [],
+      candidate: null,
     });
   }
 });
